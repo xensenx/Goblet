@@ -205,6 +205,8 @@ body::before {
   padding: 12px 20px 20px;
   display: flex; flex-direction: column; gap: 2px;
 }
+/* CRITICAL: hidden attribute overrides display:flex */
+.mobile-nav[hidden] { display: none !important; }
 .mobile-nav-link {
   padding: 10px 12px;
   font-size: 0.9375rem; font-weight: 500;

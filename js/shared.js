@@ -149,5 +149,21 @@ document.addEventListener('DOMContentLoaded', () => {
       mobileNav.hidden = isOpen;
       toggleBtn.setAttribute('aria-expanded', String(!isOpen));
     });
+
+    // Close when clicking outside the nav
+    document.addEventListener('click', (e) => {
+      if (!mobileNav.hidden && !mobileNav.contains(e.target) && !toggleBtn.contains(e.target)) {
+        mobileNav.hidden = true;
+        toggleBtn.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    // Close when a nav link inside is clicked
+    mobileNav.querySelectorAll('a').forEach(link => {
+      link.addEventListener('click', () => {
+        mobileNav.hidden = true;
+        toggleBtn.setAttribute('aria-expanded', 'false');
+      });
+    });
   }
 });
