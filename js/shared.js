@@ -42,7 +42,7 @@ const headerHTML = `
 
     <div class="nav-actions">
       <a
-        href="https://ko-fi.com/gobgoblet"
+        href="https://ko-fi.com/xensenx"
         target="_blank"
         rel="noopener noreferrer"
         class="nav-btn nav-btn-kofi"
