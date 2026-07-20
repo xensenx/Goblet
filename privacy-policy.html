@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — Gob Goblet</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" type="image/x-icon" href="https://cdn.jsdelivr.net/gh/Gob-Goblet/Gob-Goblet-assets/Mascot/favicon.ico">
+  <style>
+    .doc-content { max-width: 800px; margin: 4rem auto; padding: 0 1rem; color: var(--text-muted); line-height: 1.6; }
+    .doc-content h1 { color: var(--brand); font-size: 2.5rem; margin-bottom: 0.5rem; }
+    .doc-content h2 { color: var(--text); font-size: 1.5rem; margin-top: 2.5rem; margin-bottom: 1rem; }
+    .doc-content p, .doc-content ul { margin-bottom: 1.5rem; }
+    .doc-content li { margin-bottom: 0.5rem; margin-left: 1.5rem; }
+    .date { font-size: 0.9rem; color: rgba(255,255,255,0.5); margin-bottom: 3rem; display: block; }
+  </style>
+</head>
+<body>
+  <div id="site-header-placeholder"></div>
+  <main>
+    <div class="doc-content">
+      <h1>Privacy Policy</h1>
+      <span class="date">Effective date: 1 July 2026</span>
+      
+      <h2>What we collect</h2>
+      <p><strong>Nothing.</strong> No files, no passwords, no personal data, no analytics, no cookies.</p>
+      
+      <h2>How the app works</h2>
+      <p>All encryption happens directly in your browser. Your file never leaves your device unencrypted. The only network request made is to our key derivation service (Goblet Engine), which receives only your password and a random salt over HTTPS — never your file content or metadata.</p>
+      
+      <h2>The Key Derivation Service (Cloudflare Worker)</h2>
+      <p>We operate a key derivation service hosted on Cloudflare. It receives a password and salt to derive a cryptographic key for the inner encryption layer. It does not log, store, or transmit any received data. The server-side secret (pepper) is stored securely as a Cloudflare Secret and is never exposed in our codebase.</p>
+      
+      <h2>Third-party services</h2>
+      <ul>
+        <li><strong>Cloudflare:</strong> Hosts the static frontend pages and the Server Worker for key derivation.</li>
+        <li><strong>jsDelivr:</strong> A content delivery network (CDN) used to serve static assets like the Gob Goblet mascot and logo.</li>
+        <li><strong>Google Fonts:</strong> Provides typography for the website interface.</li>
+      </ul>
+      
+      <h2>Changes to this policy</h2>
+      <p>We may update this policy periodically to reflect changes in our service. Please check this page for the latest version.</p>
+      
+      <h2>Contact</h2>
+      <p>If you have any questions about this privacy policy, please contact: <a href="mailto:xensenx.dev@gmail.com" style="color: var(--brand);">xensenx.dev@gmail.com</a></p>
+    </div>
+  </main>
+  <div id="site-footer-placeholder"></div>
+  <script type="module" src="js/shared.js"></script>
+</body>
+</html>

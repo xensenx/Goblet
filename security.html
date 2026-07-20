@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Security — Gob Goblet</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" type="image/x-icon" href="https://cdn.jsdelivr.net/gh/Gob-Goblet/Gob-Goblet-assets/Mascot/favicon.ico">
+  <style>
+    .doc-content { max-width: 800px; margin: 4rem auto; padding: 0 1rem; color: var(--text-muted); line-height: 1.6; }
+    .doc-content h1 { color: var(--brand); font-size: 2.5rem; margin-bottom: 2rem; }
+    .doc-content h2 { color: var(--text); font-size: 1.5rem; margin-top: 2.5rem; margin-bottom: 1rem; }
+    .doc-content p, .doc-content ul { margin-bottom: 1.5rem; }
+    .doc-content li { margin-bottom: 0.5rem; margin-left: 1.5rem; }
+    .table-wrapper { overflow-x: auto; margin-bottom: 2rem; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-card); border-radius: var(--radius-md); overflow: hidden; }
+    th, td { padding: 1rem; text-align: left; border-bottom: 1px solid var(--border); }
+    th { background: rgba(255,255,255,0.02); color: var(--text); font-weight: 600; }
+    tr:last-child td { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <div id="site-header-placeholder"></div>
+  <main>
+    <div class="doc-content">
+      <h1>Security Documentation</h1>
+      
+      <h2>Cryptographic Specifications</h2>
+      <div class="table-wrapper">
+        <table>
+          <tbody>
+            <tr>
+              <th>Algorithm</th>
+              <td>AES-256-GCM</td>
+            </tr>
+            <tr>
+              <th>Key Derivation Function</th>
+              <td>PBKDF2-HMAC-SHA256 (100,000 iterations)</td>
+            </tr>
+            <tr>
+              <th>Initialization Vector (IV)</th>
+              <td>96-bit random</td>
+            </tr>
+            <tr>
+              <th>Authentication Tag</th>
+              <td>128-bit</td>
+            </tr>
+            <tr>
+              <th>Key Size</th>
+              <td>256-bit</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      
+      <h2>Double Encryption Architecture</h2>
+      <p>Gob Goblet uses two layers of encryption for maximum security. The <strong>outer layer</strong> (client-side PBKDF2, completely offline) hides all metadata, including the original filename and file type. The <strong>inner layer</strong> (server-side PBKDF2 utilizing our secret pepper) protects the actual file bytes. An attacker who intercepts a .gob file cannot determine the original filename, file type, or any metadata without the password.</p>
+      
+      <h2>The Magic Header</h2>
+      <p>Every .gob file begins with the <code>%gob</code> magic bytes, a version number, and a human-readable notice. This makes the files self-describing and identifiable by operating systems, while keeping all sensitive data completely encrypted.</p>
+      
+      <h2>Server Pepper</h2>
+      <p>Our Cloudflare Worker holds a secret "pepper" that is mixed into the inner key derivation process. Even if an attacker obtains a .gob file and knows the password, they cannot derive the inner decryption key to access the file content without this server secret. This protects against offline brute-force attacks.</p>
+      
+      <h2>Threat Model</h2>
+      <ul>
+        <li><strong>Mitigated:</strong> Network eavesdropping, offline brute-force dictionary attacks, metadata exposure (filenames/sizes), and file tampering (prevented via GCM authentication tags).</li>
+        <li><strong>Not Mitigated:</strong> An adversary who obtains both the encrypted file AND compromises the Cloudflare Worker to extract the server secret, combined with a weak user password.</li>
+      </ul>
+      
+      <h2>Trust Model</h2>
+      <p>The user must trust that the open-source frontend code is served unaltered, Cloudflare hosts the worker securely without exposing environment variables, and the secret pepper is never committed to source control.</p>
+      
+      <h2>Browser Compatibility</h2>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Browser</th>
+              <th>Status</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Chrome / Edge / Chromium</td>
+              <td>Supported</td>
+              <td>Full Web Crypto API support</td>
+            </tr>
+            <tr>
+              <td>Firefox</td>
+              <td>Supported</td>
+              <td>Full Web Crypto API support</td>
+            </tr>
+            <tr>
+              <td>Safari</td>
+              <td>Supported</td>
+              <td>Requires modern version</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+  <div id="site-footer-placeholder"></div>
+  <script type="module" src="js/shared.js"></script>
+</body>
+</html>

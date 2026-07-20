@@ -1,209 +1,192 @@
 /**
- * Goblet Frontend — App Module
+ * Gob Goblet — Application (v2)
  * ─────────────────────────────────────────────────────────────────────────────
- * Main application logic and UI state machine.
+ * State machine: idle → file-selected → password-entry → processing →
+ *                retrieve-ready (decrypt) | done (encrypt) → error
  *
- * States: idle → file-selected → mode-determined → processing → done / error
- *
- * Encrypt flow:
- *   file selected (plain) → password prompt → derive key → encrypt → self-verify → download .gob
- *
- * Decrypt flow:
- *   file selected (.gob) → parse container → password prompt → derive key → decrypt → download original
+ * Terminology used throughout the UI:
+ *   Encrypt  = "protect" / "offer for protection" / "Gob Goblet is negotiating"
+ *   Decrypt  = "retrieve your offering" / "Gob Goblet is examining"
+ *   File     = "offering"
+ *   Password = "Pact Password"
+ *   .gob     = "Goblet container"
  */
 
 import config from './config.js';
-import { buildGobContainer, parseGobContainer, tryParseGob, GobletError } from './container.js';
+import {
+  buildGobFile,
+  buildInnerContainer,
+  parseGobFile,
+  parseInnerContainer,
+  isGobFile,
+  toGobFilename,
+  bytesToBase64,
+  GobletError,
+} from './container.js';
 import {
   isCryptoSupported,
   randomBytes,
-  deriveKeyFromWorker,
-  encryptFile,
-  decryptFile,
-  selfVerify,
+  deriveOuterKey,
+  deriveInnerKeyFromWorker,
+  aesgcmEncrypt,
+  aesgcmDecrypt,
 } from './crypto.js';
-import { bytesToBase64 } from './container.js';
+import { icons } from './icons.js';
 
 // ─── App State ───────────────────────────────────────────────────────────────
 
 const state = {
-  /** @type {'idle'|'file-selected'|'processing'|'done'|'error'} */
-  phase: 'idle',
-  /** @type {'encrypt'|'decrypt'|null} */
-  mode: null,
-  /** @type {File|null} */
-  file: null,
-  /** @type {object|null} parsed .gob container */
-  gobData: null,
-  /** Whether a processing operation is currently running */
-  busy: false,
+  phase:    'idle',   // 'idle' | 'file-selected' | 'processing' | 'retrieve-ready' | 'done' | 'error'
+  mode:     null,     // 'protect' | 'retrieve'
+  file:     null,     // File
+  gobData:  null,     // parsed outer envelope from parseGobFile()
+  innerData: null,    // parsed inner container from parseInnerContainer()
+  resultBlob: null,   // Blob ready for download (decrypt flow)
+  resultName: null,   // filename for download
+  busy:     false,
 };
 
-// ─── DOM refs ─────────────────────────────────────────────────────────────────
+// ─── DOM helpers ─────────────────────────────────────────────────────────────
+
+const $ = id => document.getElementById(id);
 
 const dom = {
-  dropZone:        () => document.getElementById('drop-zone'),
-  fileInput:       () => document.getElementById('file-input'),
-  fileSelectBtn:   () => document.getElementById('file-select-btn'),
-  fileName:        () => document.getElementById('file-name'),
-  fileSize:        () => document.getElementById('file-size'),
-  fileMeta:        () => document.getElementById('file-meta'),
-  modeBadge:       () => document.getElementById('mode-badge'),
-  modeSection:     () => document.getElementById('mode-section'),
-  passwordSection: () => document.getElementById('password-section'),
-  passwordInput:   () => document.getElementById('password-input'),
-  passwordToggle:  () => document.getElementById('password-toggle'),
-  passwordWarn:    () => document.getElementById('password-warn'),
-  gobMetaCard:     () => document.getElementById('gob-meta-card'),
-  gobOrigName:     () => document.getElementById('gob-orig-name'),
-  gobTimestamp:    () => document.getElementById('gob-timestamp'),
-  actionBtn:       () => document.getElementById('action-btn'),
-  resetBtn:        () => document.getElementById('reset-btn'),
-  statusBar:       () => document.getElementById('status-bar'),
-  statusText:      () => document.getElementById('status-text'),
-  statusIcon:      () => document.getElementById('status-icon'),
-  progressRing:    () => document.getElementById('progress-ring'),
-  cryptoWarning:   () => document.getElementById('crypto-warning'),
-  mainCard:        () => document.getElementById('main-card'),
+  dropZone:        () => $('drop-zone'),
+  fileInput:       () => $('file-input'),
+  fileSelectBtn:   () => $('file-select-btn'),
+  fileInfo:        () => $('file-info'),
+  fileInfoName:    () => $('file-info-name'),
+  fileInfoSize:    () => $('file-info-size'),
+  modeBadge:       () => $('mode-badge'),
+  modeSection:     () => $('mode-section'),
+  gobMetaCard:     () => $('gob-meta-card'),
+  gobOrigName:     () => $('gob-orig-name'),
+  gobTimestamp:    () => $('gob-timestamp'),
+  passwordSection: () => $('password-section'),
+  passwordInput:   () => $('password-input'),
+  passwordToggle:  () => $('password-toggle'),
+  passwordWarn:    () => $('password-warn'),
+  actionBtn:       () => $('action-btn'),
+  resetBtn:        () => $('reset-btn'),
+  statusBar:       () => $('status-bar'),
+  statusText:      () => $('status-text'),
+  statusSpinner:   () => $('status-spinner'),
+  downloadCard:    () => $('download-card'),
+  downloadFilename:() => $('download-filename'),
+  downloadBtn:     () => $('download-btn'),
+  cryptoWarning:   () => $('crypto-warning'),
+  mainCard:        () => $('main-card'),
 };
 
-// ─── Initialisation ───────────────────────────────────────────────────────────
+// ─── Boot ────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Check Web Crypto support
+  // Inject SVG icons into toggle button
+  if (dom.passwordToggle()) {
+    dom.passwordToggle().innerHTML = icons.eye;
+  }
+
   if (!isCryptoSupported()) {
-    dom.cryptoWarning().classList.remove('hidden');
-    dom.mainCard().classList.add('hidden');
+    dom.cryptoWarning()?.classList.remove('hidden');
+    dom.mainCard()?.classList.add('hidden');
     return;
   }
 
-  attachEventListeners();
+  bindEvents();
   renderIdle();
 });
 
-// ─── Event Listeners ──────────────────────────────────────────────────────────
+// ─── Events ───────────────────────────────────────────────────────────────────
 
-function attachEventListeners() {
-  // File select button
+function bindEvents() {
+  // File select
   dom.fileSelectBtn().addEventListener('click', () => dom.fileInput().click());
-
-  // File input change
-  dom.fileInput().addEventListener('change', (e) => {
-    const files = e.target.files;
-    handleFileList(files);
-    // Reset so same file can be re-selected
+  dom.fileInput().addEventListener('change', e => {
+    handleFileList(e.target.files);
     e.target.value = '';
   });
 
   // Drag and drop
   const dz = dom.dropZone();
-  dz.addEventListener('dragover', (e) => {
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dz-over'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('dz-over'));
+  dz.addEventListener('drop', e => {
     e.preventDefault();
-    dz.classList.add('drag-over');
-  });
-  dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
-  dz.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dz.classList.remove('drag-over');
+    dz.classList.remove('dz-over');
     handleFileList(e.dataTransfer.files);
   });
 
-  // Password input — show/hide empty warning
+  // Password input
   dom.passwordInput().addEventListener('input', () => {
-    const isEmpty = dom.passwordInput().value.length === 0;
-    dom.passwordWarn().classList.toggle('visible', isEmpty);
-    updateActionButton();
+    const empty = dom.passwordInput().value.length === 0;
+    dom.passwordWarn().classList.toggle('visible', empty);
+    updateActionBtn();
   });
 
-  // Password visibility toggle
+  // Password visibility
+  let pwVisible = false;
   dom.passwordToggle().addEventListener('click', () => {
-    const inp = dom.passwordInput();
-    const isText = inp.type === 'text';
-    inp.type = isText ? 'password' : 'text';
-    dom.passwordToggle().textContent = isText ? '👁' : '🙈';
-    dom.passwordToggle().setAttribute('aria-label', isText ? 'Show password' : 'Hide password');
+    pwVisible = !pwVisible;
+    dom.passwordInput().type = pwVisible ? 'text' : 'password';
+    dom.passwordToggle().innerHTML = pwVisible ? icons.eyeOff : icons.eye;
+    dom.passwordToggle().setAttribute('aria-label', pwVisible ? 'Hide password' : 'Show password');
   });
 
-  // Action button (Encrypt / Decrypt)
+  // Action
   dom.actionBtn().addEventListener('click', handleAction);
 
-  // Reset button
+  // Reset
   dom.resetBtn().addEventListener('click', handleReset);
+
+  // Download button (decrypt flow)
+  dom.downloadBtn()?.addEventListener('click', handleDownload);
 }
 
 // ─── File handling ────────────────────────────────────────────────────────────
 
-/**
- * Handles a FileList from either drag-drop or file input.
- * @param {FileList} files
- */
 async function handleFileList(files) {
   if (state.busy) return;
-
-  if (!files || files.length === 0) return;
+  if (!files?.length) return;
 
   if (files.length > 1) {
-    setStatus('error', '⚠️ Please select only one file at a time.');
+    setStatus('error', 'Please offer one file at a time.');
     return;
   }
 
   const file = files[0];
-
-  // Size check
-  if (file.size > config.MAX_FILE_SIZE) {
-    setStatus(
-      'error',
-      `⚠️ File exceeds the 25 MB limit (${formatBytes(file.size)}). Please choose a smaller file.`,
-    );
-    return;
-  }
-
   state.file = file;
   state.phase = 'file-selected';
 
-  // Determine mode
-  await determineMode(file);
+  await detectMode(file);
 }
 
-/**
- * Reads the file and determines whether it's a .gob (decrypt) or plain file (encrypt).
- * @param {File} file
- */
-async function determineMode(file) {
-  setStatus('idle', 'Analysing file…');
+async function detectMode(file) {
+  setStatus('processing', 'Examining your offering\u2026');
 
-  let mode = 'encrypt';
+  let mode = 'protect';
   let gobData = null;
 
-  // Attempt to read as text and detect .gob structure
-  // Only try if file is small enough to be a JSON container
-  if (file.size < 50 * 1024 * 1024) {
-    try {
-      const text = await readFileAsText(file);
-      const result = tryParseGob(text);
-      if (result.isGob) {
-        mode = 'decrypt';
-        // Full validation parse
-        try {
-          gobData = parseGobContainer(text);
-        } catch (err) {
-          if (err instanceof GobletError) {
-            setStatus('error', err.message);
-            return;
-          }
-          setStatus('error', 'Invalid Goblet file — cannot parse.');
-          return;
-        }
+  try {
+    // Quick probe: read first 2 KB just to check for the magic header
+    const probe = await readFileAsText(file, 2048);
+    if (isGobFile(probe)) {
+      mode = 'retrieve';
+      // Magic found — now read the FULL file for proper parsing
+      try {
+        const fullText = await readFileAsText(file);
+        gobData = parseGobFile(fullText);
+      } catch (err) {
+        setStatus('error', err instanceof GobletError ? err.message : 'This Goblet container appears to be damaged.');
+        return;
       }
-    } catch {
-      // Not readable as text — treat as binary plain file
-      mode = 'encrypt';
     }
+  } catch {
+    mode = 'protect'; // Binary file, not text
   }
 
-  state.mode = mode;
+  state.mode    = mode;
   state.gobData = gobData;
-  state.phase = 'mode-determined';
+  state.phase   = 'password-entry';
 
   renderFileSelected(file, mode, gobData);
 }
@@ -212,63 +195,67 @@ async function determineMode(file) {
 
 async function handleAction() {
   if (state.busy) return;
-
   const password = dom.passwordInput().value;
-  // Note: we allow empty password (per spec) but warn in UI
 
-  if (state.mode === 'encrypt') {
-    await runEncrypt(state.file, password);
+  if (state.mode === 'protect') {
+    await runProtect(state.file, password);
   } else {
-    await runDecrypt(state.gobData, password);
+    await runRetrieve(state.file, state.gobData, password);
   }
 }
 
-// ─── Encrypt flow ─────────────────────────────────────────────────────────────
+// ─── PROTECT (Encrypt) flow ───────────────────────────────────────────────────
 
-/**
- * Full encryption flow.
- * @param {File} file
- * @param {string} password
- */
-async function runEncrypt(file, password) {
+async function runProtect(file, password) {
   setBusy(true);
-
   try {
     // 1. Read file bytes
-    setStatus('processing', '📖 Reading file…');
+    setStatus('processing', 'Reading your offering\u2026');
     const fileBytes = await readFileAsArrayBuffer(file);
 
-    // 2. Generate salt and IV
-    const salt = randomBytes(config.SALT_BYTES);
-    const iv = randomBytes(config.IV_BYTES);
-    const saltB64 = bytesToBase64(salt);
+    // 2. Generate inner salt & IV
+    const innerSalt = randomBytes(config.SALT_BYTES);
+    const innerIv   = randomBytes(config.IV_BYTES);
 
-    // 3. Derive key via Worker
-    setStatus('processing', '🔑 Deriving encryption key…');
-    const cryptoKey = await deriveKeyFromWorker(password, saltB64);
+    // 3. Derive inner key via Worker (PBKDF2 + pepper)
+    setStatus('processing', 'Gob Goblet is negotiating the inner pact\u2026');
+    const innerSaltB64 = bytesToBase64(innerSalt);
+    const innerKey = await deriveInnerKeyFromWorker(password, innerSaltB64);
 
-    // 4. Encrypt
-    setStatus('processing', '🔒 Encrypting…');
-    const ciphertext = await encryptFile(fileBytes, cryptoKey, iv);
+    // 4. Encrypt file bytes (inner layer)
+    setStatus('processing', 'Sealing your file\u2026');
+    const innerCiphertext = await aesgcmEncrypt(fileBytes, innerKey, innerIv);
 
-    // 5. Self-verify
-    setStatus('processing', '✅ Verifying…');
-    await selfVerify(new Uint8Array(fileBytes), ciphertext, cryptoKey, iv);
-
-    // 6. Build container and download
-    setStatus('processing', '📦 Packaging…');
-    const gobJson = buildGobContainer({
+    // 5. Build inner container JSON bytes
+    const innerContainerBytes = buildInnerContainer({
       originalName: file.name,
-      salt,
-      iv,
-      ciphertext,
+      innerSalt,
+      innerIv,
+      ciphertext: innerCiphertext,
     });
 
-    const gobFilename = file.name + '.gob';
-    triggerDownload(new TextEncoder().encode(gobJson), gobFilename, 'application/json');
+    // 6. Generate outer salt & IV
+    const outerSalt = randomBytes(config.SALT_BYTES);
+    const outerIv   = randomBytes(config.IV_BYTES);
 
-    setStatus('done', `✨ File has been gobbled! "${gobFilename}" downloaded.`);
-    renderDone();
+    // 7. Derive outer key in browser (PBKDF2, no server)
+    setStatus('processing', 'Gob Goblet is negotiating the outer pact\u2026');
+    const outerKey = await deriveOuterKey(password, outerSalt);
+
+    // 8. Encrypt inner container bytes (outer layer)
+    const outerPayload = await aesgcmEncrypt(innerContainerBytes, outerKey, outerIv);
+
+    // 9. Build .gob file text
+    setStatus('processing', 'Assembling the Goblet container\u2026');
+    const gobText = buildGobFile({ outerSalt, outerIv, payload: outerPayload });
+
+    // 10. Trigger download
+    const gobFilename = toGobFilename(file.name);
+    const gobBytes = new TextEncoder().encode(gobText);
+    triggerDownload(gobBytes, gobFilename, 'application/octet-stream');
+
+    setStatus('done', `Gob Goblet has gobbled the file. \u201c${gobFilename}\u201d is ready.`);
+    renderProtectDone();
   } catch (err) {
     handleError(err);
   } finally {
@@ -276,31 +263,51 @@ async function runEncrypt(file, password) {
   }
 }
 
-// ─── Decrypt flow ─────────────────────────────────────────────────────────────
+// ─── RETRIEVE (Decrypt) flow ──────────────────────────────────────────────────
 
-/**
- * Full decryption flow.
- * @param {object} gobData   — Parsed .gob container
- * @param {string} password
- */
-async function runDecrypt(gobData, password) {
+async function runRetrieve(file, gobData, password) {
   setBusy(true);
-
   try {
-    // 1. Derive key via Worker (using salt from container)
-    setStatus('processing', '🔑 Deriving decryption key…');
-    const saltB64 = bytesToBase64(gobData.salt);
-    const cryptoKey = await deriveKeyFromWorker(password, saltB64);
+    // 1. Derive outer key in browser
+    setStatus('processing', 'Gob Goblet is examining the outer seal\u2026');
+    const outerKey = await deriveOuterKey(password, gobData.outerSalt);
 
-    // 2. Decrypt
-    setStatus('processing', '🔓 Decrypting…');
-    const plainBytes = await decryptFile(gobData.ciphertext, cryptoKey, gobData.iv);
+    // 2. Decrypt outer payload → inner container JSON bytes
+    let innerBytes;
+    try {
+      innerBytes = await aesgcmDecrypt(gobData.payload, outerKey, gobData.outerIv);
+    } catch {
+      throw new GobletError('Incorrect password or corrupt file. The pact was not recognised.');
+    }
 
-    // 3. Download original file
-    triggerDownload(plainBytes, gobData.originalName, 'application/octet-stream');
+    // 3. Parse inner container (reveals originalName + salts)
+    setStatus('processing', 'Unwrapping the offering\u2026');
+    const innerData = parseInnerContainer(innerBytes);
+    state.innerData = innerData;
 
-    setStatus('done', `🎉 Your offering is returned! "${gobData.originalName}" downloaded.`);
-    renderDone();
+    // Show metadata card
+    showGobMeta(innerData.originalName, innerData.timestamp);
+
+    // 4. Derive inner key via Worker (PBKDF2 + pepper)
+    setStatus('processing', 'Gob Goblet is retrieving the inner pact\u2026');
+    const innerKey = await deriveInnerKeyFromWorker(password, innerData.innerSaltB64);
+
+    // 5. Decrypt file bytes (inner layer)
+    setStatus('processing', 'Unsealing the original file\u2026');
+    let plainBytes;
+    try {
+      plainBytes = await aesgcmDecrypt(innerData.ciphertext, innerKey, innerData.innerIv);
+    } catch {
+      throw new GobletError('Incorrect password or corrupt file. The pact was not recognised.');
+    }
+
+    // 6. Hold result in memory — show download button (no auto-download)
+    state.resultBlob = new Blob([plainBytes], { type: 'application/octet-stream' });
+    state.resultName = innerData.originalName;
+    state.phase = 'retrieve-ready';
+
+    setStatus('done', `Your offering has been retrieved. Download \u201c${innerData.originalName}\u201d below.`);
+    renderRetrieveReady(innerData.originalName);
   } catch (err) {
     handleError(err);
   } finally {
@@ -308,129 +315,149 @@ async function runDecrypt(gobData, password) {
   }
 }
 
-// ─── UI Render helpers ────────────────────────────────────────────────────────
+// ─── Download (manual, decrypt flow) ─────────────────────────────────────────
+
+function handleDownload() {
+  if (!state.resultBlob || !state.resultName) return;
+  const url = URL.createObjectURL(state.resultBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = state.resultName;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 2000);
+}
+
+// ─── Render helpers ───────────────────────────────────────────────────────────
 
 function renderIdle() {
-  dom.modeSection().classList.add('hidden');
-  dom.passwordSection().classList.add('hidden');
-  dom.gobMetaCard().classList.add('hidden');
+  // Reset everything
+  hide('mode-section', 'password-section', 'gob-meta-card', 'file-info', 'download-card');
+  show();
   dom.resetBtn().classList.add('hidden');
-  dom.fileMeta().classList.add('hidden');
   dom.actionBtn().classList.add('hidden');
-  dom.dropZone().classList.remove('has-file');
-  dom.modeBadge().textContent = '';
-  dom.modeBadge().className = 'mode-badge';
+  dom.dropZone().classList.remove('dz-has-file');
   dom.passwordInput().value = '';
   dom.passwordWarn().classList.remove('visible');
-  setStatus('idle', 'Drop a file here or click to select');
+  dom.modeBadge().className = 'mode-badge';
+  dom.modeBadge().textContent = '';
+  setStatus('idle', 'Offer your file for protection, or retrieve a Goblet container');
 }
 
-/**
- * @param {File} file
- * @param {'encrypt'|'decrypt'} mode
- * @param {object|null} gobData
- */
 function renderFileSelected(file, mode, gobData) {
-  // File info
-  dom.fileName().textContent = file.name;
-  dom.fileSize().textContent = formatBytes(file.size);
-  dom.fileMeta().classList.remove('hidden');
-  dom.dropZone().classList.add('has-file');
+  // File info row
+  dom.fileInfoName().textContent = file.name;
+  dom.fileInfoName().title = file.name;
+  dom.fileInfoSize().textContent = formatBytes(file.size);
+  dom.fileInfo().classList.remove('hidden');
+  dom.dropZone().classList.add('dz-has-file');
 
   // Mode badge
   const badge = dom.modeBadge();
-  badge.classList.remove('hidden');
-  if (mode === 'encrypt') {
-    badge.textContent = '🔒 Encrypt Mode';
-    badge.className = 'mode-badge encrypt';
+  if (mode === 'protect') {
+    badge.textContent = 'Protection Mode';
+    badge.className = 'mode-badge mode-protect';
   } else {
-    badge.textContent = '🔓 Decrypt Mode';
-    badge.className = 'mode-badge decrypt';
+    badge.textContent = 'Retrieval Mode';
+    badge.className = 'mode-badge mode-retrieve';
   }
   dom.modeSection().classList.remove('hidden');
 
-  // .gob metadata card
-  if (mode === 'decrypt' && gobData) {
-    dom.gobOrigName().textContent = gobData.originalName;
-    dom.gobTimestamp().textContent = gobData.timestamp
-      ? new Date(gobData.timestamp).toLocaleString()
-      : 'Unknown';
-    dom.gobMetaCard().classList.remove('hidden');
-  } else {
-    dom.gobMetaCard().classList.add('hidden');
-  }
+  // .gob meta card (shown but populated later after outer decrypt in retrieve flow)
+  // For protect mode: hide it
+  dom.gobMetaCard().classList.add('hidden');
 
-  // Password section
+  // Password
   dom.passwordSection().classList.remove('hidden');
   dom.passwordInput().placeholder =
-    mode === 'encrypt' ? 'Enter a strong password to protect this file' : 'Enter your password';
+    mode === 'protect'
+      ? 'Enter the Pact Password to protect this file'
+      : 'Enter the Pact Password used when this file was protected';
   dom.passwordInput().focus();
 
-  // Action button
-  dom.actionBtn().textContent = mode === 'encrypt' ? '🔒 Encrypt & Download' : '🔓 Decrypt & Download';
+  // Action btn
+  dom.actionBtn().textContent =
+    mode === 'protect' ? 'Offer for Protection' : 'Retrieve Offering';
   dom.actionBtn().classList.remove('hidden');
-  updateActionButton();
+  updateActionBtn();
 
-  // Reset button
   dom.resetBtn().classList.remove('hidden');
 
-  setStatus('idle', mode === 'encrypt' ? 'Enter a password and click Encrypt' : 'Enter your password and click Decrypt');
+  const statusMsg = mode === 'protect'
+    ? 'Enter your Pact Password and offer the file for protection'
+    : 'Enter your Pact Password to retrieve your offering';
+  setStatus('idle', statusMsg);
 }
 
-function renderDone() {
+function showGobMeta(originalName, timestamp) {
+  dom.gobOrigName().textContent = originalName;
+  dom.gobTimestamp().textContent = timestamp
+    ? new Date(timestamp).toLocaleString()
+    : 'Unknown';
+  dom.gobMetaCard().classList.remove('hidden');
+}
+
+function renderProtectDone() {
   dom.actionBtn().classList.add('hidden');
-  dom.passwordInput().value = '';
   dom.passwordSection().classList.add('hidden');
-  // Keep reset button visible so user can go again
+  dom.passwordInput().value = '';
 }
 
-function updateActionButton() {
-  const btn = dom.actionBtn();
-  const hasFile = state.file !== null;
-  btn.disabled = !hasFile || state.busy;
+function renderRetrieveReady(originalName) {
+  dom.actionBtn().classList.add('hidden');
+  dom.passwordSection().classList.add('hidden');
+  dom.passwordInput().value = '';
+
+  // Show download card
+  const card = dom.downloadCard();
+  dom.downloadFilename().textContent = originalName;
+  card.classList.remove('hidden');
 }
 
 // ─── Status bar ───────────────────────────────────────────────────────────────
 
-/**
- * @param {'idle'|'processing'|'done'|'error'} type
- * @param {string} message
- */
 function setStatus(type, message) {
-  const bar = dom.statusBar();
-  const text = dom.statusText();
-  const ring = dom.progressRing();
+  const bar     = dom.statusBar();
+  const text    = dom.statusText();
+  const spinner = dom.statusSpinner();
 
   bar.className = `status-bar status-${type}`;
   text.textContent = message;
-
-  // Show spinner only when processing
-  ring.style.display = type === 'processing' ? 'block' : 'none';
+  spinner.style.display = type === 'processing' ? '' : 'none';
 }
 
 // ─── Error handler ────────────────────────────────────────────────────────────
 
 function handleError(err) {
-  if (err instanceof GobletError) {
-    setStatus('error', `❌ ${err.message}`);
-  } else {
-    console.error('[Goblet] Unexpected error:', err);
-    setStatus('error', '❌ An unexpected error occurred. Please try again.');
-  }
+  const msg = err instanceof GobletError
+    ? err.message
+    : 'An unexpected error occurred. Please try again.';
+  setStatus('error', msg);
+  console.error('[Gob Goblet]', err);
 }
 
 // ─── Reset ────────────────────────────────────────────────────────────────────
 
 function handleReset() {
   if (state.busy) return;
-  state.file = null;
-  state.mode = null;
-  state.gobData = null;
-  state.phase = 'idle';
+  // Revoke any held blob URL
+  if (state.resultBlob) {
+    state.resultBlob = null;
+    state.resultName = null;
+  }
+  Object.assign(state, {
+    phase: 'idle', mode: null, file: null,
+    gobData: null, innerData: null,
+    resultBlob: null, resultName: null, busy: false,
+  });
   renderIdle();
 }
 
-// ─── Busy state ───────────────────────────────────────────────────────────────
+// ─── Busy ─────────────────────────────────────────────────────────────────────
 
 function setBusy(busy) {
   state.busy = busy;
@@ -440,69 +467,57 @@ function setBusy(busy) {
   dom.dropZone().style.pointerEvents = busy ? 'none' : '';
 }
 
-// ─── File I/O helpers ─────────────────────────────────────────────────────────
+function updateActionBtn() {
+  dom.actionBtn().disabled = !state.file || state.busy;
+}
 
-/**
- * Reads a File as an ArrayBuffer.
- * @param {File} file
- * @returns {Promise<ArrayBuffer>}
- */
+// ─── DOM helpers ──────────────────────────────────────────────────────────────
+
+function hide(...ids) {
+  ids.forEach(id => $(id)?.classList.add('hidden'));
+}
+
+function show(...ids) {
+  ids.forEach(id => $(id)?.classList.remove('hidden'));
+}
+
+// ─── File I/O ─────────────────────────────────────────────────────────────────
+
 function readFileAsArrayBuffer(file) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new GobletError('Failed to read the file.'));
-    reader.readAsArrayBuffer(file);
+    const r = new FileReader();
+    r.onload  = () => resolve(r.result);
+    r.onerror = () => reject(new GobletError('Failed to read the file.'));
+    r.readAsArrayBuffer(file);
   });
 }
 
-/**
- * Reads a File as a UTF-8 string.
- * @param {File} file
- * @returns {Promise<string>}
- */
-function readFileAsText(file) {
+function readFileAsText(file, maxBytes) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error('Cannot read file as text'));
-    reader.readAsText(file, 'utf-8');
+    const r = new FileReader();
+    r.onload  = () => resolve(r.result);
+    r.onerror = () => reject(new Error('Cannot read file as text'));
+    // If maxBytes is given, read a slice; otherwise read the entire file
+    const src = maxBytes != null ? file.slice(0, maxBytes) : file;
+    r.readAsText(src, 'utf-8');
   });
 }
 
-/**
- * Triggers a file download in the browser.
- * @param {Uint8Array} bytes
- * @param {string} filename
- * @param {string} mimeType
- */
-function triggerDownload(bytes, filename, mimeType) {
-  const blob = new Blob([bytes], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.style.display = 'none';
+function triggerDownload(bytes, filename, mime) {
+  const blob = new Blob([bytes], { type: mime });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = filename; a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
-  // Clean up
-  setTimeout(() => {
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, 1000);
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1500);
 }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
-/**
- * Formats a byte count as a human-readable string.
- * @param {number} bytes
- * @returns {string}
- */
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+function formatBytes(n) {
+  if (n === 0) return '0 B';
+  const k = 1024, s = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(n) / Math.log(k));
+  return `${parseFloat((n / Math.pow(k, i)).toFixed(1))} ${s[i]}`;
 }
